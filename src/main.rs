@@ -1,23 +1,24 @@
-use std::io::prelude::*;
-use std::net::TcpStream;
-use std::net::TcpListener;
-
 use std::sync::Mutex;
 use std::sync::Arc;
 
 use pasts;
 use async_std;
 
+use async_std::prelude::*;
+
 async fn async_main() {
-    let listener = TcpListener::bind("127.0.0.1:7878").unwrap();
+    let listener = async_std::net::TcpListener::bind("127.0.0.1:7878").await.unwrap();
+    let mut incoming = listener.incoming();
 
     let pool = ThreadPool::new(4);
 
-    for stream in listener.incoming() {
+    while let Some(stream) = incoming.next().await {
         let stream = stream.unwrap();
 
-        pool.execute(|| {
-            handle_connection(stream);
+        let f = handle_connection(stream);
+
+        pool.execute(move || {
+            <pasts::ThreadInterrupt as pasts::Interrupt>::block_on(f);
         });
     }
 }
@@ -31,9 +32,9 @@ enum Message {
     Terminate,
 }
 
-fn handle_connection(mut stream: TcpStream) {
+async fn handle_connection(mut stream: async_std::net::TcpStream) {
     let mut buffer = [0; 512];
-    stream.read(&mut buffer).unwrap();
+    stream.read(&mut buffer).await.unwrap();
 
     let get = b"GET / HTTP/1.1\r\n";
 
@@ -47,8 +48,8 @@ fn handle_connection(mut stream: TcpStream) {
 
     let response = format!("{}{}", status_line, contents);
 
-    stream.write(response.as_bytes()).unwrap();
-    stream.flush().unwrap();
+    stream.write(response.as_bytes()).await.unwrap();
+    stream.flush().await.unwrap();
 }
 
 pub struct ThreadPool {
