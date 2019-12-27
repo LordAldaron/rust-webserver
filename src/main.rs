@@ -5,12 +5,10 @@ use std::net::TcpListener;
 use std::sync::Mutex;
 use std::sync::Arc;
 
-enum Message {
-    NewJob(Job),
-    Terminate,
-}
+use pasts;
+use async_std;
 
-fn main() {
+async fn async_main() {
     let listener = TcpListener::bind("127.0.0.1:7878").unwrap();
 
     let pool = ThreadPool::new(4);
@@ -22,6 +20,15 @@ fn main() {
             handle_connection(stream);
         });
     }
+}
+
+fn main() {
+    <pasts::ThreadInterrupt as pasts::Interrupt>::block_on(async_main());
+}
+
+enum Message {
+    NewJob(Job),
+    Terminate,
 }
 
 fn handle_connection(mut stream: TcpStream) {
