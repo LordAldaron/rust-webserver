@@ -140,9 +140,11 @@ impl Thread {
     }
 
     /// Send a Future to this thread.
-    pub fn send(&self, future: Box<dyn Future<Output = AsyncMsg> + Send + 'static>) {
+    pub fn send<T>(&self, future: T)
+        where T: Future<Output = AsyncMsg> + Send + 'static
+    {
         self.num_tasks.fetch_add(1, Ordering::Relaxed);
-        self.sender.send(Message::NewJob(future)).unwrap();
+        self.sender.send(Message::NewJob(Box::new(future))).unwrap();
     }
 }
 
@@ -184,7 +186,7 @@ async fn async_main() {
 
         let future = handle_connection(stream);
 
-        threads[thread_id].send(Box::new(future));
+        threads[thread_id].send(future);
     }
 }
 
