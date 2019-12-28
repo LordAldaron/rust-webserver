@@ -1,25 +1,172 @@
-use std::sync::Mutex;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::future::Future;
+use std::sync::mpsc::Receiver;
+use std::task::Poll;
+use std::task::Context;
+use std::pin::Pin;
 
 use pasts;
 use async_std;
 
 use async_std::prelude::*;
 
+// Asynchronous message for passing between tasks on this thread.
+enum AsyncMsg {
+    // Quit the application.
+    Quit,
+    // Spawn a new task.
+    NewTask(Receiver<Message>, WebserverTask),
+    // Reduce task count.
+    OldTask,
+}
+
+type WebserverTask = Option<Pin<Box<dyn Future<Output = AsyncMsg> + Send>>>;
+
+// Blocking call for another thread, to be used as a Future
+fn async_thread_main_future(recv: Receiver<Message>) -> AsyncMsg {
+    match recv.recv().unwrap() {
+        Message::NewJob(task) => AsyncMsg::NewTask(recv, task),
+        Message::Terminate => AsyncMsg::Quit,
+    }
+}
+
+// Asynchronous loop for a thread.
+async fn async_thread_main(recv: Receiver<Message>, num_tasks: Arc<AtomicUsize>) {
+    let mut tasks: Vec<WebserverTask> = vec![];
+
+    tasks.push(Some(Box::pin(pasts::spawn_blocking(move ||
+        async_thread_main_future(recv)
+    ))));
+
+    struct SliceSelect<'a, T> {
+        // FIXME: Shouldn't have to be a `Box`?  Probably does.
+        tasks: &'a mut Vec<Option<Pin<Box<dyn Future<Output = T> + Send>>>>,
+    }
+
+    impl<'a, T> Future for SliceSelect<'a, T> {
+        type Output = T;
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<T> {
+            for future_id in 0..self.tasks.len() {
+                if let Some(future) = &mut self.tasks[future_id] {
+                    let future = future.as_mut();
+                    match future.poll(cx) {
+                        Poll::Ready(ret) => {
+                            self.tasks.remove(future_id);
+                            return Poll::Ready(ret);
+                        },
+                        Poll::Pending => {}
+                    }
+                }
+            }
+
+            Poll::Pending
+        }
+    }
+
+    loop {
+        let slice_select = SliceSelect { tasks: &mut tasks };
+
+        match slice_select.await {
+            // Spawn a new task.
+            AsyncMsg::NewTask(recv, task) => {
+                tasks.push(Some(Box::pin(pasts::spawn_blocking(move ||
+                    async_thread_main_future(recv)
+                ))));
+                tasks.push(task)
+            }
+            // Reduce task count.
+            AsyncMsg::OldTask => {
+                num_tasks.fetch_sub(1, Ordering::Relaxed);
+            }
+            // Quit the application.
+            AsyncMsg::Quit => {
+                break
+            }
+        }
+    }
+}
+
+// A function that represents one of the 4 threads that can run tasks.
+fn thread_main(recv: Receiver<Message>, num_tasks: Arc<AtomicUsize>) {
+    <pasts::ThreadInterrupt as pasts::Interrupt>::block_on(
+        async_thread_main(recv, num_tasks)
+    );
+}
+
+/// Handle to one of the threads.
+struct Thread {
+    // Number of asynchronous tasks on each thread.
+    num_tasks: Arc<AtomicUsize>,
+    // Join Handle for this thread.
+    join: Option<std::thread::JoinHandle<()>>,
+    // Message sender to the thread.
+    sender: std::sync::mpsc::Sender<Message>,
+}
+
+impl Thread {
+    /// Create a new thread.
+    pub fn new() -> (Self, std::sync::mpsc::Receiver<Message>) {
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        let num_tasks = Arc::new(AtomicUsize::new(0));
+        let join = None;
+
+        (Thread {
+            num_tasks, join, sender,
+        }, receiver)
+    }
+
+    /// Start the thread.
+    pub fn start(&mut self, receiver: std::sync::mpsc::Receiver<Message>) {
+        let num_tasks = Arc::clone(&self.num_tasks);
+
+        self.join = Some(std::thread::spawn(move || {
+            thread_main(receiver, num_tasks);
+        }));
+    }
+
+    /// Get the number of tasks on this thread.
+    pub fn tasks(&self) -> usize {
+        self.num_tasks.load(Ordering::Relaxed)
+    }
+
+    /// Send a Future to this thread.
+    pub fn send(&self, future: Pin<Box<dyn Future<Output = AsyncMsg> + Send + 'static>>) {
+        self.num_tasks.fetch_add(1, Ordering::Relaxed);
+        self.sender.send(Message::NewJob(Some(future))).unwrap();
+    }
+}
+
 async fn async_main() {
     let listener = async_std::net::TcpListener::bind("127.0.0.1:7878").await.unwrap();
+    let mut threads = vec![];
+    for i in 0..4 {
+        let (thread, receiver) = Thread::new();
+        threads.push(thread);
+        threads[i].start(receiver);
+    }
     let mut incoming = listener.incoming();
 
-    let pool = ThreadPool::new(4);
-
     while let Some(stream) = incoming.next().await {
+        // Select the thread that is the least busy.
+        let mut thread_id = 0;
+        let mut thread_tasks = threads[0].tasks();
+        for id in 1..threads.len() {
+            let n_tasks = threads[id].tasks();
+            if n_tasks < thread_tasks {
+                thread_id = id;
+                thread_tasks = n_tasks;
+            }
+        }
+
+        // Send task to selected thread.
         let stream = stream.unwrap();
 
-        let f = handle_connection(stream);
+        let future = handle_connection(stream);
 
-        pool.execute(move || {
-            <pasts::ThreadInterrupt as pasts::Interrupt>::block_on(f);
-        });
+        threads[thread_id].send(Box::pin(future));
     }
 }
 
@@ -28,11 +175,11 @@ fn main() {
 }
 
 enum Message {
-    NewJob(Job),
+    NewJob(WebserverTask),
     Terminate,
 }
 
-async fn handle_connection(mut stream: async_std::net::TcpStream) {
+async fn handle_connection(mut stream: async_std::net::TcpStream) -> AsyncMsg {
     let mut buffer = [0; 512];
     stream.read(&mut buffer).await.unwrap();
 
@@ -50,9 +197,11 @@ async fn handle_connection(mut stream: async_std::net::TcpStream) {
 
     stream.write(response.as_bytes()).await.unwrap();
     stream.flush().await.unwrap();
+
+    AsyncMsg::OldTask
 }
 
-pub struct ThreadPool {
+/*pub struct ThreadPool {
     threads: Vec<Worker>,
     sender: std::sync::mpsc::Sender<Message>,
 }
@@ -113,19 +262,6 @@ impl Drop for ThreadPool {
     }
 }
 
-trait FnBox {
-    fn call_box(self: Box<Self>);
-}
-
-impl<F: FnOnce()> FnBox for F {
-    fn call_box(self: Box<F>) {
-        (*self)()
-    }
-}
-
-type Job = Box<dyn FnBox + Send + 'static>;
-
-
 struct Worker {
     id: usize,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -157,4 +293,4 @@ impl Worker {
             thread,
         }
     }
-}
+}*/
