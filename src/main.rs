@@ -23,22 +23,11 @@ enum AsyncMsg {
 
 type WebserverTask = Pin<Box<dyn Future<Output = AsyncMsg> + Send>>;
 
-// Blocking call for another thread, to be used as a Future
-fn async_thread_main_future(recv: Receiver<Message>) -> AsyncMsg {
-    match recv.recv().unwrap() {
-        Message::NewJob(task) => AsyncMsg::NewTask(recv, task),
-        Message::Terminate => AsyncMsg::Quit,
-    }
-}
-
-// Asynchronous loop for a thread.
-async fn async_thread_main(recv: Receiver<Message>, num_tasks: Arc<AtomicUsize>) {
-    let mut tasks: Vec<WebserverTask> = vec![];
-
-    tasks.push(Box::pin(pasts::spawn_blocking(move ||
-        async_thread_main_future(recv)
-    )));
-
+// Wait until one future is completed in a Vec, remove, then return it's result.
+async fn slice_select<T>(
+    tasks: &mut Vec<Pin<Box<dyn Future<Output = T> + Send>>>,
+) -> T
+{
     struct SliceSelect<'a, T> {
         // FIXME: Shouldn't have to be a `Box`?  Probably does.
         tasks: &'a mut Vec<Pin<Box<dyn Future<Output = T> + Send>>>,
@@ -64,10 +53,27 @@ async fn async_thread_main(recv: Receiver<Message>, num_tasks: Arc<AtomicUsize>)
         }
     }
 
-    loop {
-        let slice_select = SliceSelect { tasks: &mut tasks };
+    SliceSelect { tasks }.await
+}
 
-        match slice_select.await {
+// Blocking call for another thread, to be used as a Future
+fn async_thread_main_future(recv: Receiver<Message>) -> AsyncMsg {
+    match recv.recv().unwrap() {
+        Message::NewJob(task) => AsyncMsg::NewTask(recv, task),
+        Message::Terminate => AsyncMsg::Quit,
+    }
+}
+
+// Asynchronous loop for a thread.
+async fn async_thread_main(recv: Receiver<Message>, num_tasks: Arc<AtomicUsize>) {
+    let mut tasks: Vec<WebserverTask> = vec![];
+
+    tasks.push(Box::pin(pasts::spawn_blocking(move ||
+        async_thread_main_future(recv)
+    )));
+
+    loop {
+        match slice_select(&mut tasks).await {
             // Spawn a new task.
             AsyncMsg::NewTask(recv, task) => {
                 tasks.push(Box::pin(pasts::spawn_blocking(move ||
