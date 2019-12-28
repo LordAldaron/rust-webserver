@@ -21,16 +21,16 @@ enum AsyncMsg {
     OldTask,
 }
 
-type WebserverTask = Pin<Box<dyn Future<Output = AsyncMsg> + Send>>;
+type WebserverTask = Box<dyn Future<Output = AsyncMsg> + Send>;
 
 // Wait until one future is completed in a Vec, remove, then return it's result.
 async fn slice_select<T>(
-    tasks: &mut Vec<Pin<Box<dyn Future<Output = T> + Send>>>,
+    tasks: &mut Vec<Box<dyn Future<Output = T> + Send>>,
 ) -> T
 {
     struct SliceSelect<'a, T> {
         // FIXME: Shouldn't have to be a `Box`?  Probably does.
-        tasks: &'a mut Vec<Pin<Box<dyn Future<Output = T> + Send>>>,
+        tasks: &'a mut Vec<Box<dyn Future<Output = T> + Send>>,
     }
 
     impl<'a, T> Future for SliceSelect<'a, T> {
@@ -38,11 +38,13 @@ async fn slice_select<T>(
 
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<T> {
             for future_id in 0..self.tasks.len() {
-                let future = self.tasks[future_id].as_mut();
+                let mut future = unsafe {
+                    Pin::new_unchecked(self.tasks[future_id].as_mut())
+                };
 
-                match future.poll(cx) {
+                match future.as_mut().poll(cx) {
                     Poll::Ready(ret) => {
-                        self.tasks.remove(future_id);
+                        let _ = self.tasks.remove(future_id);
                         return Poll::Ready(ret);
                     },
                     Poll::Pending => {}
@@ -68,7 +70,7 @@ fn async_thread_main_future(recv: Receiver<Message>) -> AsyncMsg {
 async fn async_thread_main(recv: Receiver<Message>, num_tasks: Arc<AtomicUsize>) {
     let mut tasks: Vec<WebserverTask> = vec![];
 
-    tasks.push(Box::pin(pasts::spawn_blocking(move ||
+    tasks.push(Box::new(pasts::spawn_blocking(move ||
         async_thread_main_future(recv)
     )));
 
@@ -76,7 +78,7 @@ async fn async_thread_main(recv: Receiver<Message>, num_tasks: Arc<AtomicUsize>)
         match slice_select(&mut tasks).await {
             // Spawn a new task.
             AsyncMsg::NewTask(recv, task) => {
-                tasks.push(Box::pin(pasts::spawn_blocking(move ||
+                tasks.push(Box::new(pasts::spawn_blocking(move ||
                     async_thread_main_future(recv)
                 )));
                 tasks.push(task)
@@ -138,7 +140,7 @@ impl Thread {
     }
 
     /// Send a Future to this thread.
-    pub fn send(&self, future: Pin<Box<dyn Future<Output = AsyncMsg> + Send + 'static>>) {
+    pub fn send(&self, future: Box<dyn Future<Output = AsyncMsg> + Send + 'static>) {
         self.num_tasks.fetch_add(1, Ordering::Relaxed);
         self.sender.send(Message::NewJob(future)).unwrap();
     }
@@ -182,7 +184,7 @@ async fn async_main() {
 
         let future = handle_connection(stream);
 
-        threads[thread_id].send(Box::pin(future));
+        threads[thread_id].send(Box::new(future));
     }
 }
 
