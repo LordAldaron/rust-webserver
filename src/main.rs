@@ -142,6 +142,9 @@ impl Thread {
 impl Drop for Thread {
     fn drop(&mut self) {
         self.sender.send(Message::Terminate).unwrap();
+        if let Some(thread) = self.join.take() {
+            thread.join().unwrap();
+        }
     }
 }
 
