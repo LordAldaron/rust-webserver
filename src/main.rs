@@ -21,7 +21,7 @@ enum AsyncMsg {
     OldTask,
 }
 
-type WebserverTask = Option<Pin<Box<dyn Future<Output = AsyncMsg> + Send>>>;
+type WebserverTask = Pin<Box<dyn Future<Output = AsyncMsg> + Send>>;
 
 // Blocking call for another thread, to be used as a Future
 fn async_thread_main_future(recv: Receiver<Message>) -> AsyncMsg {
@@ -35,13 +35,13 @@ fn async_thread_main_future(recv: Receiver<Message>) -> AsyncMsg {
 async fn async_thread_main(recv: Receiver<Message>, num_tasks: Arc<AtomicUsize>) {
     let mut tasks: Vec<WebserverTask> = vec![];
 
-    tasks.push(Some(Box::pin(pasts::spawn_blocking(move ||
+    tasks.push(Box::pin(pasts::spawn_blocking(move ||
         async_thread_main_future(recv)
-    ))));
+    )));
 
     struct SliceSelect<'a, T> {
         // FIXME: Shouldn't have to be a `Box`?  Probably does.
-        tasks: &'a mut Vec<Option<Pin<Box<dyn Future<Output = T> + Send>>>>,
+        tasks: &'a mut Vec<Pin<Box<dyn Future<Output = T> + Send>>>,
     }
 
     impl<'a, T> Future for SliceSelect<'a, T> {
@@ -49,15 +49,14 @@ async fn async_thread_main(recv: Receiver<Message>, num_tasks: Arc<AtomicUsize>)
 
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<T> {
             for future_id in 0..self.tasks.len() {
-                if let Some(future) = &mut self.tasks[future_id] {
-                    let future = future.as_mut();
-                    match future.poll(cx) {
-                        Poll::Ready(ret) => {
-                            self.tasks.remove(future_id);
-                            return Poll::Ready(ret);
-                        },
-                        Poll::Pending => {}
-                    }
+                let future = self.tasks[future_id].as_mut();
+
+                match future.poll(cx) {
+                    Poll::Ready(ret) => {
+                        self.tasks.remove(future_id);
+                        return Poll::Ready(ret);
+                    },
+                    Poll::Pending => {}
                 }
             }
 
@@ -71,9 +70,9 @@ async fn async_thread_main(recv: Receiver<Message>, num_tasks: Arc<AtomicUsize>)
         match slice_select.await {
             // Spawn a new task.
             AsyncMsg::NewTask(recv, task) => {
-                tasks.push(Some(Box::pin(pasts::spawn_blocking(move ||
+                tasks.push(Box::pin(pasts::spawn_blocking(move ||
                     async_thread_main_future(recv)
-                ))));
+                )));
                 tasks.push(task)
             }
             // Reduce task count.
@@ -135,7 +134,7 @@ impl Thread {
     /// Send a Future to this thread.
     pub fn send(&self, future: Pin<Box<dyn Future<Output = AsyncMsg> + Send + 'static>>) {
         self.num_tasks.fetch_add(1, Ordering::Relaxed);
-        self.sender.send(Message::NewJob(Some(future))).unwrap();
+        self.sender.send(Message::NewJob(future)).unwrap();
     }
 }
 
@@ -149,7 +148,9 @@ impl Drop for Thread {
 }
 
 async fn async_main() {
-    let listener = async_std::net::TcpListener::bind("127.0.0.1:7878").await.unwrap();
+    let listener = async_std::net::TcpListener::bind("127.0.0.1:7878")
+        .await
+        .unwrap();
     let mut threads = vec![];
     for i in 0..4 {
         let (thread, receiver) = Thread::new();
