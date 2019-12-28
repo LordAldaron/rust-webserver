@@ -114,24 +114,18 @@ struct Thread {
 
 impl Thread {
     /// Create a new thread.
-    pub fn new() -> (Self, std::sync::mpsc::Receiver<Message>) {
+    pub fn new() -> Self {
         let (sender, receiver) = std::sync::mpsc::channel();
 
         let num_tasks = Arc::new(AtomicUsize::new(0));
-        let join = None;
+        let thread_num_tasks = Arc::clone(&num_tasks);
+        let join = Some(std::thread::spawn(move || 
+            thread_main(receiver, thread_num_tasks)
+        ));
 
-        (Thread {
+        Thread {
             num_tasks, join, sender,
-        }, receiver)
-    }
-
-    /// Start the thread.
-    pub fn start(&mut self, receiver: std::sync::mpsc::Receiver<Message>) {
-        let num_tasks = Arc::clone(&self.num_tasks);
-
-        self.join = Some(std::thread::spawn(move || {
-            thread_main(receiver, num_tasks);
-        }));
+        }
     }
 
     /// Get the number of tasks on this thread.
@@ -162,10 +156,8 @@ async fn async_main() {
         .await
         .unwrap();
     let mut threads = vec![];
-    for i in 0..4 {
-        let (thread, receiver) = Thread::new();
-        threads.push(thread);
-        threads[i].start(receiver);
+    for _ in 0..4 {
+        threads.push(Thread::new());
     }
     let mut incoming = listener.incoming();
 
