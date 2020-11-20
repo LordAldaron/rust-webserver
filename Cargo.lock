@@ -324,9 +324,9 @@ checksum = "427c3892f9e783d91cc128285287e70a59e206ca452770ece88a76f7a3eddd72"
 
 [[package]]
 name = "pasts"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e757c35a2e17447d0c8499811054a274f9d46cd94ec9b526a4ecab0bdb672d87"
+checksum = "173875041b89de133d766ebd8887b039d4422b22a6fee7aacb66acba64b964fd"
 
 [[package]]
 name = "pin-project-lite"
