@@ -183,7 +183,7 @@ async fn async_main() {
 }
 
 fn main() {
-    pasts::spawn(async_main);
+    pasts::exec!(async_main());
 }
 
 enum Message {
