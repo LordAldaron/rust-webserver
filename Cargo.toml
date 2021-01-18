@@ -8,4 +8,4 @@ edition = "2018"
 
 [dependencies]
 pasts = "0.6"
-async-std = "1.7"
+async-std = "1.9"
